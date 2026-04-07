@@ -50,7 +50,7 @@ class ReplayMemory:
         batch = random.sample(self.buffer, batch_size)
         
         states = tf.convert_to_tensor([e.state       for e in batch], dtype=tf.float32)
-        actions = tf.convert_to_tensor([e.actio     for e in batch], dtype=tf.int32)
+        actions = tf.convert_to_tensor([e.action     for e in batch], dtype=tf.int32)
         rewards = tf.convert_to_tensor([e.reward    for e in batch], dtype=tf.float32)
         next_states = tf.convert_to_tensor([e.next_state    for e in batch], dtype=tf.float32)
         done_vals = tf.convert_to_tensor([e.done        for e in batch], dtype=tf.float32)
@@ -71,6 +71,8 @@ class DQNAgent:
         
         self.t_step = 0
         self.q_network = self._build_network()
+        self.target_network = self._build_network()
+        
         self.target_network.set_weights(self.q_network.get_weights())
         self.optimizer = Adam(learning_rate=LR)
         self.memory = ReplayMemory(MEMORY_SIZE)
@@ -84,4 +86,65 @@ class DQNAgent:
             Dense(self.action_size, activation='linear'),
         ])
         return model
+
+    def get_action(self, state):
+        if random.random() < self.epsilon:
+            return random.randint(0, self.action_size - 1)
+        else:
+            state_tensor = tf.expand_dims(
+                tf.convert_to_tensor(state, dtype=tf.float32),
+                axis=0
+            )
+            q_values = self.q_network(state_tensor, training=False)
+            return int(tf.argmax(q_values[0]).numpy())
+        
+    
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.add(state, action, reward, next_state, done)
+    
+    def learn(self):
+        self.t_step = (self.t_step + 1) % UPDATE_EVERY
+        
+        if self.t_step == 0:
+            if len(self.memory) >= MIN_REPLAY_SIZE:
+                experiences = self.memory.sample(BATCH_SIZE)
+                self._train_step(experiences)
+    
+    def _train_step(self, experiences):
+        with tf.GradientTape() as tape:
+            loss = self._compute_loss(experiences)
+        gradients = tape.gradient(loss, self.q_network.trainable_variables)
+        
+        self.optimizer.apply_gradients(
+            zip(gradients, self.q_network.trainable_variables) 
+        )
+        
+        self._soft_update_target()
+    
+    def _compute_loss(self, experiences):
+        states, actions, rewards, next_states, done_vals = experiences
+        
+        max_qsa = tf.reduce_max(
+            self.target_network(next_states, training=False),
+            axis=1
+        )
+        
+        y_targets = rewards + GAMMA * max_qsa * (1 - done_vals)
+        q_values = self.q_network(states, training=True)
+        action_mask = tf.one_hot(actions, self.action_size)
+        q_sa = tf.reduce_sum(q_values * action_mask, axis=1)
+        loss = MSE(y_targets, q_sa)
+        return loss
+    
+    def _soft_update_target(self):
+        for q_weight, target_weight in zip(
+            self.q_network.trainable_variables,
+            self.target_network.trainable_variables 
+        ):
+            target_weight.assign(TAU * q_weight + (1 - TAU) * target_weight)
+    
+    def decay_epsilon(self):
+        self.epsilon = max(EPSILON_END, self.epsilon * EPSILON_DECAY)
+        
+        
         
